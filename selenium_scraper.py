@@ -221,35 +221,199 @@ class FreeElectionsScraper:
             self.close()
             self.setup_driver(self.driver is not None)  # Recreate with same headless setting
     
-    def scrape_electoral_data_isolated(self, national_id: str, timeout: int = 30) -> dict:
+    def scrape_electoral_data_with_tab(self, national_id: str, timeout: int = 30) -> dict:
         """
-        Scrape electoral data using an isolated browser instance for this request.
-        This ensures complete separation between concurrent user requests.
+        Scrape electoral data using a new tab in an existing browser instance.
+        This provides better performance than creating new browser instances.
         """
-        # Create a new browser instance for this request
-        temp_scraper = FreeElectionsScraper(headless=True, max_retries=self.max_retries, retry_delay=self.retry_delay)
+        # This method will be called by the browser pool manager
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Request timed out")
+
+        # Set up timeout alarm
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout)
+
         try:
-            # Use the temp scraper's method but with timeout
-            def timeout_handler(signum, frame):
-                raise TimeoutError("Request timed out")
-
-            # Set up timeout alarm
-            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(timeout)
-
-            try:
-                result = temp_scraper.scrape_electoral_data(national_id)
-                return result
-            finally:
-                # Reset signal handler
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
+            result = self.scrape_electoral_data_tab_isolated(national_id)
+            return result
         finally:
-            # Always close the temporary browser instance
+            # Reset signal handler
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+
+    def scrape_electoral_data_tab_isolated(self, national_id: str) -> dict:
+        """
+        Scrape data using a new tab, ensuring complete isolation from other tabs.
+        """
+        original_window = None
+        new_tab = None
+
+        try:
+            # Store the original window handle
+            original_window = self.driver.current_window_handle
+
+            # Open a new tab
+            self.driver.execute_script("window.open('');")
+            time.sleep(0.5)  # Brief wait for tab to open
+
+            # Switch to the new tab
+            all_windows = self.driver.window_handles
+            new_tab = [handle for handle in all_windows if handle != original_window][0]
+            self.driver.switch_to.window(new_tab)
+
+            # Navigate to the inquiry page in the new tab
+            self.driver.get(INQUIRY_URL)
+            time.sleep(1)
+
+            # Perform the scraping in this isolated tab
+            result = self._scrape_in_current_tab(national_id)
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in tab-isolated scraping: {e}")
+            return {
+                'success': False,
+                'error': f'Tab isolation error: {str(e)}'
+            }
+        finally:
+            # Always cleanup: close the tab and switch back
             try:
-                temp_scraper.close()
-            except:
-                pass
+                if new_tab and len(self.driver.window_handles) > 1:
+                    self.driver.close()  # Close current tab
+
+                # Switch back to original window if it still exists
+                if original_window and original_window in self.driver.window_handles:
+                    self.driver.switch_to.window(original_window)
+                elif self.driver.window_handles:
+                    self.driver.switch_to.window(self.driver.window_handles[0])
+
+            except Exception as e:
+                logger.warning(f"Error during tab cleanup: {e}")
+
+    def _scrape_in_current_tab(self, national_id: str) -> dict:
+        """
+        Perform the actual scraping within the current tab.
+        This is similar to the original scrape_electoral_data but tab-aware.
+        """
+        last_error = None
+
+        for attempt in range(self.max_retries):
+            try:
+                if attempt > 0:
+                    delay = self.retry_delay * (2 ** (attempt - 1))
+                    logger.info(f"Retry attempt {attempt + 1}/{self.max_retries} after {delay}s delay")
+                    time.sleep(delay)
+
+                logger.info(f"Querying national ID: {national_id} (attempt {attempt + 1}/{self.max_retries})")
+
+                # Check if we need to reset the current tab
+                try:
+                    current_url = self.driver.current_url
+                    if INQUIRY_URL not in current_url:
+                        self.driver.get(INQUIRY_URL)
+                        time.sleep(1)
+                except Exception as e:
+                    logger.warning(f"Failed to navigate to page: {e}")
+                    self.driver.get(INQUIRY_URL)
+                    time.sleep(1)
+
+                wait = WebDriverWait(self.driver, 15)
+
+                # Switch to the iframe (the form is inside an iframe)
+                try:
+                    iframe = wait.until(EC.presence_of_element_located((By.ID, "ocv_iframe_id")))
+                    self.driver.switch_to.frame(iframe)
+                    logger.info("Switched to iframe")
+                except TimeoutException:
+                    logger.warning("Could not find iframe - retrying")
+                    last_error = "Could not find iframe - page structure may have changed"
+                    try:
+                        self.driver.switch_to.default_content()
+                    except:
+                        pass
+                    continue
+
+                # Find and fill the national ID input field
+                try:
+                    nid_input = wait.until(EC.presence_of_element_located((By.ID, "nid")))
+                    nid_input.clear()
+                    nid_input.send_keys(national_id)
+                    logger.info(f"Entered national ID: {national_id}")
+                except TimeoutException:
+                    logger.warning("Could not find national ID input field - retrying")
+                    last_error = "Could not find national ID input field"
+                    try:
+                        self.driver.switch_to.default_content()
+                    except:
+                        pass
+                    continue
+
+                # Find and click the submit button
+                try:
+                    submit_btn = wait.until(EC.element_to_be_clickable((By.ID, "submit_btn")))
+                    submit_btn.click()
+                    logger.info("Clicked submit button")
+                except TimeoutException:
+                    logger.warning("Could not find submit button - retrying")
+                    last_error = "Could not find submit button"
+                    try:
+                        self.driver.switch_to.default_content()
+                    except:
+                        pass
+                    continue
+
+                # Wait for results to load
+                time.sleep(1.5)
+
+                # Wait a bit more for dynamic content
+                try:
+                    wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'مركزك الإنتخابي') or contains(text(), 'قسم') or contains(text(), 'عفوا') or contains(text(), 'الرقم القومي')]")))
+                except:
+                    pass  # Continue even if timeout
+
+                # Extract data from results
+                result_data = self.extract_result_data()
+
+                # Switch back to default content
+                try:
+                    self.driver.switch_to.default_content()
+                except:
+                    pass
+
+                # Check if extraction was successful
+                if result_data.get('success'):
+                    logger.info(f"Successfully retrieved data for {national_id}")
+                    return result_data
+                else:
+                    error = result_data.get('error', '')
+                    if 'parse' in error.lower() or 'extract' in error.lower():
+                        last_error = error
+                        logger.warning(f"Data extraction failed: {error} - retrying")
+                        continue
+                    else:
+                        return result_data
+
+            except Exception as e:
+                logger.error(f"Error scraping data for {national_id} (attempt {attempt + 1}): {str(e)}")
+                last_error = str(e)
+                try:
+                    self.driver.switch_to.default_content()
+                except:
+                    pass
+
+                if attempt == self.max_retries - 1:
+                    break
+
+        # All retries exhausted
+        logger.error(f"Failed to scrape data for {national_id} after {self.max_retries} attempts")
+        return {
+            'success': False,
+            'error': f'Failed after {self.max_retries} attempts. Last error: {last_error}',
+            'national_id': national_id,
+            'retries_exhausted': True
+        }
 
     def scrape_electoral_data(self, national_id: str, timeout: int = 30) -> dict:
         """

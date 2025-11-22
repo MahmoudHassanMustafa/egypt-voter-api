@@ -21,17 +21,17 @@ services:
       - UVICORN_HOST=0.0.0.0
       - UVICORN_PORT=8000
     restart: unless-stopped
-    # Increased resource limits for production (scaled for 10 concurrent requests)
+    # Resource limits for browser pool (3 instances with tab concurrency)
     deploy:
       resources:
         limits:
-          cpus: "4"  # Increased for 10 concurrent browser instances
-          memory: 8G  # Increased for Chrome stability with more concurrent requests
+          cpus: "3"  # For 3 concurrent browser instances
+          memory: 6G  # For browser pool with tab-based concurrency
         reservations:
           cpus: "2"
-          memory: 4G
-    # Shared memory size for Chrome - increased for stability
-    shm_size: 8gb
+          memory: 3G
+    # Shared memory size for Chrome - optimized for pool approach
+    shm_size: 6gb
     # Improved health check with longer timeout
     healthcheck:
       test:
