@@ -20,6 +20,7 @@ from selenium.webdriver.common.keys import Keys
 import logging
 import argparse
 import re
+import signal
 
 # Configure logging
 logging.basicConfig(
@@ -44,18 +45,22 @@ INQUIRY_URL = "https://www.elections.eg/inquiry"
 class FreeElectionsScraper:
     """Free scraper using Selenium - no AI/API costs!"""
     
-    def __init__(self, headless: bool = False, max_retries: int = 3, retry_delay: int = 2):
+    def __init__(self, headless: bool = False, max_retries: int = 3, retry_delay: int = 2, session_timeout: int = 300):
         """
         Initialize the scraper with browser options.
-        
+
         Args:
             headless: Run browser in headless mode (no GUI)
             max_retries: Maximum number of retry attempts for failed requests
             retry_delay: Base delay in seconds between retries (uses exponential backoff)
+            session_timeout: Maximum time in seconds to keep browser session alive
         """
         self.driver = None
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.session_timeout = session_timeout
+        self.session_start_time = None
+        self.last_activity_time = None
         self.setup_driver(headless)
     
     def setup_driver(self, headless: bool = False):
@@ -147,142 +152,217 @@ class FreeElectionsScraper:
                 logger.info("Chrome WebDriver initialized using system ChromeDriver")
             
             self.driver.maximize_window()
+            self.session_start_time = time.time()
+            self.last_activity_time = time.time()
             logger.info("Chrome WebDriver initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize WebDriver: {e}")
             logger.error("Make sure ChromeDriver is installed and in PATH, or install webdriver-manager")
             raise
+
+    def is_session_valid(self) -> bool:
+        """Check if the current browser session is still valid and should be reused."""
+        if self.driver is None:
+            return False
+
+        current_time = time.time()
+
+        # Check if session has exceeded timeout
+        if (current_time - self.session_start_time) > self.session_timeout:
+            logger.info(f"Browser session expired (timeout: {self.session_timeout}s)")
+            return False
+
+        # Check if session has been inactive for too long (half the session timeout)
+        if (current_time - self.last_activity_time) > (self.session_timeout / 2):
+            logger.info("Browser session inactive for too long, refreshing")
+            return False
+
+        try:
+            # Test if browser is still responsive by checking current URL
+            self.driver.current_url
+            return True
+        except Exception:
+            logger.warning("Browser session is not responsive")
+            return False
+
+    def reset_session(self):
+        """Reset the browser session by navigating back to the main page."""
+        try:
+            if self.driver:
+                # Navigate back to the main inquiry page
+                self.driver.get(INQUIRY_URL)
+                time.sleep(1)  # Brief wait for page load
+                self.last_activity_time = time.time()
+                logger.info("Browser session reset to main page")
+        except Exception as e:
+            logger.warning(f"Failed to reset browser session: {e}")
+            # If reset fails, close and recreate the browser
+            self.close()
+            self.setup_driver(self.driver is not None)  # Recreate with same headless setting
     
-    def scrape_electoral_data(self, national_id: str) -> dict:
+    def scrape_electoral_data(self, national_id: str, timeout: int = 30) -> dict:
         """
-        Scrape electoral data for a given national ID with retry mechanism.
-        
+        Scrape electoral data for a given national ID with retry mechanism and timeout.
+
         Args:
             national_id: The national ID to query
-            
+            timeout: Maximum time in seconds to allow for the entire operation
+
         Returns:
             Dictionary with extracted electoral information
         """
-        last_error = None
-        
-        for attempt in range(self.max_retries):
-            try:
-                if attempt > 0:
-                    # Exponential backoff: wait longer with each retry
-                    delay = self.retry_delay * (2 ** (attempt - 1))
-                    logger.info(f"Retry attempt {attempt + 1}/{self.max_retries} after {delay}s delay")
-                    time.sleep(delay)
-                
-                logger.info(f"Querying national ID: {national_id} (attempt {attempt + 1}/{self.max_retries})")
-                
-                # Navigate to the inquiry page
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Request timed out")
+
+        # Set up timeout alarm
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout)
+
+        try:
+            last_error = None
+
+            for attempt in range(self.max_retries):
                 try:
-                    self.driver.get(INQUIRY_URL)
-                    time.sleep(2)  # Wait for page to load
-                except Exception as e:
-                    logger.warning(f"Failed to navigate to page: {e}")
-                    last_error = f"Navigation error: {str(e)}"
-                    continue
-                
-                wait = WebDriverWait(self.driver, 15)
-                
-                # Switch to the iframe (the form is inside an iframe)
-                try:
-                    iframe = wait.until(EC.presence_of_element_located((By.ID, "ocv_iframe_id")))
-                    self.driver.switch_to.frame(iframe)
-                    logger.info("Switched to iframe")
-                except TimeoutException:
-                    logger.warning("Could not find iframe - retrying")
-                    last_error = "Could not find iframe - page structure may have changed"
+                    if attempt > 0:
+                        # Exponential backoff: wait longer with each retry
+                        delay = self.retry_delay * (2 ** (attempt - 1))
+                        logger.info(f"Retry attempt {attempt + 1}/{self.max_retries} after {delay}s delay")
+                        time.sleep(delay)
+
+                    logger.info(f"Querying national ID: {national_id} (attempt {attempt + 1}/{self.max_retries})")
+
+                    # Check if we need to reset or recreate the browser session
+                    if not self.is_session_valid():
+                        logger.info("Browser session invalid, resetting...")
+                        self.reset_session()
+
+                    # Update activity timestamp
+                    self.last_activity_time = time.time()
+
+                    # Navigate to the inquiry page (only if not already there or if it's a retry)
                     try:
-                        self.driver.switch_to.default_content()
-                    except:
-                        pass
-                    continue
-                
-                # Find and fill the national ID input field
-                try:
-                    nid_input = wait.until(EC.presence_of_element_located((By.ID, "nid")))
-                    nid_input.clear()
-                    nid_input.send_keys(national_id)
-                    logger.info(f"Entered national ID: {national_id}")
-                except TimeoutException:
-                    logger.warning("Could not find national ID input field - retrying")
-                    last_error = "Could not find national ID input field"
-                    try:
-                        self.driver.switch_to.default_content()
-                    except:
-                        pass
-                    continue
-                
-                # Find and click the submit button
-                try:
-                    submit_btn = wait.until(EC.element_to_be_clickable((By.ID, "submit_btn")))
-                    submit_btn.click()
-                    logger.info("Clicked submit button")
-                except TimeoutException:
-                    logger.warning("Could not find submit button - retrying")
-                    last_error = "Could not find submit button"
-                    try:
-                        self.driver.switch_to.default_content()
-                    except:
-                        pass
-                    continue
-                
-                # Wait for results to load
-                time.sleep(3)
-                
-                # Wait a bit more for dynamic content
-                try:
-                    wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'مركزك الإنتخابي') or contains(text(), 'قسم') or contains(text(), 'عفوا') or contains(text(), 'الرقم القومي')]")))
-                except:
-                    pass  # Continue even if timeout
-                
-                # Extract data from results
-                result_data = self.extract_result_data()
-                
-                # Switch back to default content
-                try:
-                    self.driver.switch_to.default_content()
-                except:
-                    pass
-                
-                # Check if extraction was successful
-                if result_data.get('success'):
-                    logger.info(f"Successfully retrieved data for {national_id}")
-                    return result_data
-                else:
-                    # Extraction failed, but don't retry if it's a known error state
-                    error = result_data.get('error', '')
-                    if 'parse' in error.lower() or 'extract' in error.lower():
-                        # These are likely data extraction issues, retry might help
-                        last_error = error
-                        logger.warning(f"Data extraction failed: {error} - retrying")
+                        current_url = self.driver.current_url
+                        if INQUIRY_URL not in current_url or attempt > 0:
+                            self.driver.get(INQUIRY_URL)
+                            time.sleep(1)  # Reduced wait time for session reuse
+                        else:
+                            logger.info("Already on inquiry page, proceeding")
+                    except Exception as e:
+                        logger.warning(f"Failed to navigate to page: {e}")
+                        last_error = f"Navigation error: {str(e)}"
                         continue
-                    else:
-                        # Other errors, return immediately
+
+                    wait = WebDriverWait(self.driver, 15)
+
+                    # Switch to the iframe (the form is inside an iframe)
+                    try:
+                        iframe = wait.until(EC.presence_of_element_located((By.ID, "ocv_iframe_id")))
+                        self.driver.switch_to.frame(iframe)
+                        logger.info("Switched to iframe")
+                    except TimeoutException:
+                        logger.warning("Could not find iframe - retrying")
+                        last_error = "Could not find iframe - page structure may have changed"
+                        try:
+                            self.driver.switch_to.default_content()
+                        except:
+                            pass
+                        continue
+
+                    # Find and fill the national ID input field
+                    try:
+                        nid_input = wait.until(EC.presence_of_element_located((By.ID, "nid")))
+                        nid_input.clear()
+                        nid_input.send_keys(national_id)
+                        logger.info(f"Entered national ID: {national_id}")
+                    except TimeoutException:
+                        logger.warning("Could not find national ID input field - retrying")
+                        last_error = "Could not find national ID input field"
+                        try:
+                            self.driver.switch_to.default_content()
+                        except:
+                            pass
+                        continue
+
+                    # Find and click the submit button
+                    try:
+                        submit_btn = wait.until(EC.element_to_be_clickable((By.ID, "submit_btn")))
+                        submit_btn.click()
+                        logger.info("Clicked submit button")
+                    except TimeoutException:
+                        logger.warning("Could not find submit button - retrying")
+                        last_error = "Could not find submit button"
+                        try:
+                            self.driver.switch_to.default_content()
+                        except:
+                            pass
+                        continue
+
+                    # Wait for results to load (reduced from 3s to 1.5s for better performance)
+                    time.sleep(1.5)
+
+                    # Wait a bit more for dynamic content with shorter timeout
+                    try:
+                        wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'مركزك الإنتخابي') or contains(text(), 'قسم') or contains(text(), 'عفوا') or contains(text(), 'الرقم القومي')]")))
+                    except:
+                        pass  # Continue even if timeout
+
+                    # Extract data from results
+                    result_data = self.extract_result_data()
+
+                    # Switch back to default content
+                    try:
+                        self.driver.switch_to.default_content()
+                    except:
+                        pass
+
+                    # Check if extraction was successful
+                    if result_data.get('success'):
+                        logger.info(f"Successfully retrieved data for {national_id}")
                         return result_data
-                
-            except Exception as e:
-                logger.error(f"Error scraping data for {national_id} (attempt {attempt + 1}): {str(e)}")
-                last_error = str(e)
-                try:
-                    self.driver.switch_to.default_content()
-                except:
-                    pass
-                
-                # If it's the last attempt, don't continue
-                if attempt == self.max_retries - 1:
-                    break
+                    else:
+                        # Extraction failed, but don't retry if it's a known error state
+                        error = result_data.get('error', '')
+                        if 'parse' in error.lower() or 'extract' in error.lower():
+                            # These are likely data extraction issues, retry might help
+                            last_error = error
+                            logger.warning(f"Data extraction failed: {error} - retrying")
+                            continue
+                        else:
+                            # Other errors, return immediately
+                            return result_data
+
+                except Exception as e:
+                    logger.error(f"Error scraping data for {national_id} (attempt {attempt + 1}): {str(e)}")
+                    last_error = str(e)
+                    try:
+                        self.driver.switch_to.default_content()
+                    except:
+                        pass
+
+                    # If it's the last attempt, don't continue
+                    if attempt == self.max_retries - 1:
+                        break
         
-        # All retries exhausted
-        logger.error(f"Failed to scrape data for {national_id} after {self.max_retries} attempts")
-        return {
-            'success': False,
-            'error': f'Failed after {self.max_retries} attempts. Last error: {last_error}',
-            'national_id': national_id,
-            'retries_exhausted': True
-        }
+            # All retries exhausted
+            logger.error(f"Failed to scrape data for {national_id} after {self.max_retries} attempts")
+            return {
+                'success': False,
+                'error': f'Failed after {self.max_retries} attempts. Last error: {last_error}',
+                'national_id': national_id,
+                'retries_exhausted': True
+            }
+        except TimeoutError:
+            logger.error(f"Request timed out for {national_id} after {timeout} seconds")
+            return {
+                'success': False,
+                'error': f'Request timed out after {timeout} seconds',
+                'national_id': national_id,
+                'timeout': True
+            }
+        finally:
+            # Reset signal handler
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
     
     def extract_result_data(self) -> dict:
         """

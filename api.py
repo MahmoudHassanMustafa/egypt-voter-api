@@ -8,11 +8,13 @@ from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field, field_validator, ValidationError
+from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
 from typing import Optional, Dict, Any, Literal
 import logging
 import re
 import traceback
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from selenium_scraper import FreeElectionsScraper
 
@@ -32,8 +34,32 @@ ALLOWED_DISTRICTS = [
     "قسم ثان بورفؤاد"
 ]
 
+
+def check_rate_limit(client_ip: str) -> bool:
+    """Check if client has exceeded rate limit. Returns True if allowed, False if blocked."""
+    current_time = time.time()
+    window_start = current_time - RATE_LIMIT_WINDOW
+
+    # Clean old requests from this IP
+    rate_limit_store[client_ip] = [
+        timestamp for timestamp in rate_limit_store[client_ip]
+        if timestamp > window_start
+    ]
+
+    # Check if under limit
+    if len(rate_limit_store[client_ip]) < RATE_LIMIT_REQUESTS:
+        rate_limit_store[client_ip].append(current_time)
+        return True
+
+    return False
+
 # Global scraper instance
 scraper = None
+
+# Rate limiting configuration
+RATE_LIMIT_REQUESTS = 1000  # Max requests per window
+RATE_LIMIT_WINDOW = 60     # Window in seconds (1 minute)
+rate_limit_store = defaultdict(list)  # Store timestamps per client IP
 
 
 @asynccontextmanager
@@ -42,11 +68,12 @@ async def lifespan(app: FastAPI):
     global scraper
     logger.info("Initializing scraper with retry mechanism...")
     try:
-        # Initialize with retry configuration
+        # Initialize with retry configuration and session reuse
         scraper = FreeElectionsScraper(
             headless=True,
             max_retries=3,      # Maximum retry attempts
-            retry_delay=2       # Base delay between retries (exponential backoff)
+            retry_delay=2,      # Base delay between retries (exponential backoff)
+            session_timeout=300 # Keep browser session alive for 5 minutes
         )
         logger.info(f"Scraper initialized successfully with max_retries=3, scraper object: {scraper is not None}")
     except Exception as e:
@@ -75,6 +102,29 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Rate limiting middleware
+@app.middleware("http")
+async def rate_limiting_middleware(request: Request, call_next):
+    """Rate limiting middleware to prevent abuse"""
+    # Get client IP (handle forwarded headers)
+    client_ip = request.headers.get("X-Forwarded-For", request.client.host)
+    if client_ip and "," in client_ip:
+        client_ip = client_ip.split(",")[0].strip()
+
+    if not check_rate_limit(client_ip):
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={
+                "success": False,
+                "error": f"Rate limit exceeded. Maximum {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW} seconds allowed.",
+                "retry_after": RATE_LIMIT_WINDOW
+            }
+        )
+
+    response = await call_next(request)
+    return response
+
 
 # Add CORS middleware to allow cross-origin requests
 app.add_middleware(
@@ -147,7 +197,7 @@ class NationalIDRequest(BaseModel):
     national_id: str = Field(
         ...,
         description="Egyptian national ID (exactly 14 digits)",
-        example="29710260300314"
+        json_schema_extra={"example": "29710260300314"}
     )
     
     @field_validator('national_id')
@@ -177,8 +227,7 @@ class RegisteredVoterData(BaseModel):
     subcommittee_number: str = Field(..., description="Subcommittee number")
     electoral_list_number: str = Field(..., description="Number in electoral list")
     
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class NotRegisteredData(BaseModel):
@@ -209,8 +258,8 @@ class SuccessResponse(BaseModel):
     status: Literal["registered"] = "registered"
     data: RegisteredVoterData
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "success": True,
                 "national_id": "29710260300314",
@@ -224,6 +273,7 @@ class SuccessResponse(BaseModel):
                 }
             }
         }
+    )
 
 
 class NotRegisteredResponse(BaseModel):
@@ -233,8 +283,8 @@ class NotRegisteredResponse(BaseModel):
     status: Literal["not_registered"] = "not_registered"
     data: NotRegisteredData
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "success": True,
                 "national_id": "12345678901234",
@@ -245,6 +295,7 @@ class NotRegisteredResponse(BaseModel):
                 }
             }
         }
+    )
 
 
 class UnderageResponse(BaseModel):
@@ -254,8 +305,8 @@ class UnderageResponse(BaseModel):
     status: Literal["underage"] = "underage"
     data: UnderageData
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "success": True,
                 "national_id": "12345678901234",
@@ -266,6 +317,7 @@ class UnderageResponse(BaseModel):
                 }
             }
         }
+    )
 
 
 class OutOfDistrictResponse(BaseModel):
@@ -275,8 +327,8 @@ class OutOfDistrictResponse(BaseModel):
     status: Literal["out_of_district"] = "out_of_district"
     data: OutOfDistrictData
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "success": True,
                 "national_id": "12345678901234",
@@ -290,6 +342,7 @@ class OutOfDistrictResponse(BaseModel):
                 }
             }
         }
+    )
 
 
 class ErrorResponse(BaseModel):
@@ -299,8 +352,8 @@ class ErrorResponse(BaseModel):
     error: str = Field(..., description="Error message")
     retries_exhausted: Optional[bool] = Field(None, description="Whether all retry attempts were exhausted")
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "success": False,
                 "national_id": "12345678901234",
@@ -308,6 +361,7 @@ class ErrorResponse(BaseModel):
                 "retries_exhausted": True
             }
         }
+    )
 
 
 class ValidationErrorResponse(BaseModel):
@@ -317,8 +371,8 @@ class ValidationErrorResponse(BaseModel):
     field: str = Field(..., description="Field that failed validation")
     input: Optional[str] = Field(None, description="The invalid input value")
     
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "success": False,
                 "error": "National ID must be exactly 14 digits, got 13 characters",
@@ -326,6 +380,7 @@ class ValidationErrorResponse(BaseModel):
                 "input": "2971026000314"
             }
         }
+    )
 
 
 class HealthResponse(BaseModel):
@@ -386,8 +441,8 @@ async def lookup_national_id(request: NationalIDRequest):
     logger.info(f"Received lookup request for national ID: {national_id}")
     
     try:
-        # Perform the scraping (with automatic retries)
-        result = scraper.scrape_electoral_data(national_id)
+        # Perform the scraping (with automatic retries and timeout)
+        result = scraper.scrape_electoral_data(national_id, timeout=30)
         
         # Handle None result (shouldn't happen, but defensive programming)
         if result is None:
@@ -543,6 +598,19 @@ async def lookup_national_id(request: NationalIDRequest):
             success=False,
             national_id=national_id,
             error="Network connection error. Please check your internet connection and try again.",
+            retries_exhausted=True
+        )
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=error_response.model_dump(exclude_none=True)
+        )
+    except TimeoutError as e:
+        # Timeout error
+        logger.error(f"Timeout error for {national_id}: {str(e)}")
+        error_response = ErrorResponse(
+            success=False,
+            national_id=national_id,
+            error="Request timed out. The service took too long to respond. Please try again.",
             retries_exhausted=True
         )
         return JSONResponse(
