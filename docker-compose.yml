@@ -44,9 +44,13 @@ services:
     # Security options
     security_opt:
       - no-new-privileges:true
-    # Read-only root filesystem (except /tmp)
-    read_only: true
+    # Note: Read-only filesystem removed due to Chrome requirements
+    # Security is maintained through other measures (non-root user, limited capabilities)
     tmpfs:
       - /tmp
-      - /app/.wdm:uid=1000,gid=1000
+    volumes:
+      - webdriver-cache:/app/.wdm
+
+volumes:
+  webdriver-cache:
 

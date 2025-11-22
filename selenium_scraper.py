@@ -62,20 +62,83 @@ class FreeElectionsScraper:
         """Setup Chrome WebDriver with appropriate options."""
         chrome_options = Options()
         if headless:
-            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--headless=new')  # Use new headless mode
+
+        # Essential options for running Chrome in Docker containers
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--disable-software-rasterizer')
+        chrome_options.add_argument('--remote-debugging-port=9222')
+        chrome_options.add_argument('--disable-background-timer-throttling')
+        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+        chrome_options.add_argument('--disable-renderer-backgrounding')
+        chrome_options.add_argument('--disable-features=TranslateUI')
+        chrome_options.add_argument('--disable-ipc-flooding-protection')
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        
+        chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument('--disable-plugins')
+        chrome_options.add_argument('--disable-images')
+        chrome_options.add_argument('--disable-plugins-discovery')
+        chrome_options.add_argument('--disable-print-preview')
+        chrome_options.add_argument('--disable-component-extensions-with-background-pages')
+        chrome_options.add_argument('--no-first-run')
+        chrome_options.add_argument('--disable-default-apps')
+        chrome_options.add_argument('--disable-sync')
+        chrome_options.add_argument('--hide-crash-restore-bubble')
+
+        # Memory and performance optimizations
+        chrome_options.add_argument('--memory-pressure-off')
+        chrome_options.add_argument('--max_old_space_size=4096')
+        chrome_options.add_argument('--disable-web-security')
+        chrome_options.add_argument('--allow-running-insecure-content')
+        chrome_options.add_argument('--disable-background-networking')
+        chrome_options.add_argument('--disable-client-side-phishing-detection')
+        chrome_options.add_argument('--disable-component-update')
+
         # User agent to avoid detection
-        chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+        # Set user data directory to a writable location
+        chrome_options.add_argument('--user-data-dir=/tmp/chrome-user-data')
+        chrome_options.add_argument('--data-path=/tmp/chrome-data')
+        chrome_options.add_argument('--disk-cache-dir=/tmp/chrome-cache')
+        chrome_options.add_argument('--remote-debugging-address=0.0.0.0')
         
         try:
             # Try to use webdriver-manager first (automatic ChromeDriver management)
             try:
                 from webdriver_manager.chrome import ChromeDriverManager
                 from selenium.webdriver.chrome.service import Service
-                service = Service(ChromeDriverManager().install())
+                import os
+
+                # Set custom cache path for webdriver-manager to work with read-only filesystem
+                cache_path = "/app/.wdm"
+
+                # Set environment variables for webdriver-manager
+                os.environ["WDM_LOCAL"] = "1"  # Use local cache
+                os.environ["WDM_CACHE_DIR"] = cache_path  # Set cache directory
+
+                # Also set HOME to /app so webdriver-manager uses /app/.wdm by default
+                os.environ["HOME"] = "/app"
+
+                # Ensure the directory exists
+                os.makedirs(cache_path, exist_ok=True)
+
+                # Try with custom path parameter (if supported)
+                try:
+                    driver_path = ChromeDriverManager(path=cache_path).install()
+                except TypeError:
+                    # Fallback if path parameter is not supported
+                    driver_path = ChromeDriverManager().install()
+
+                # Ensure the chromedriver executable has proper permissions
+                import stat
+                if driver_path:
+                    # Make sure the chromedriver binary is executable
+                    os.chmod(driver_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+
+                service = Service(driver_path, log_path='/tmp/chromedriver.log', log_level='DEBUG')
                 self.driver = webdriver.Chrome(service=service, options=chrome_options)
                 logger.info("Chrome WebDriver initialized using webdriver-manager")
             except ImportError:

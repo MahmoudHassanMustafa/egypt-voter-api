@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator, ValidationError
 from typing import Optional, Dict, Any, Literal
 import logging
 import re
+import traceback
 from contextlib import asynccontextmanager
 from selenium_scraper import FreeElectionsScraper
 
@@ -47,9 +48,12 @@ async def lifespan(app: FastAPI):
             max_retries=3,      # Maximum retry attempts
             retry_delay=2       # Base delay between retries (exponential backoff)
         )
-        logger.info("Scraper initialized successfully with max_retries=3")
+        logger.info(f"Scraper initialized successfully with max_retries=3, scraper object: {scraper is not None}")
     except Exception as e:
         logger.error(f"Failed to initialize scraper: {e}")
+        logger.error(f"Exception type: {type(e).__name__}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         scraper = None
     
     yield

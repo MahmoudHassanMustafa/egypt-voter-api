@@ -59,6 +59,9 @@ COPY api.py .
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 
+# Create webdriver cache directory with proper permissions (writable)
+RUN mkdir -p /app/.wdm && chown -R appuser:appuser /app/.wdm && chmod -R 755 /app/.wdm
+
 # Switch to non-root user
 USER appuser
 

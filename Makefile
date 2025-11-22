@@ -42,9 +42,8 @@ run: ## Run the container in production mode
 		--memory=$(MEMORY_LIMIT) \
 		--cpus=$(CPU_LIMIT) \
 		--security-opt no-new-privileges:true \
-		--read-only \
 		--tmpfs /tmp \
-		--tmpfs /app/.wdm:uid=1000,gid=1000 \
+		-v webdriver-cache:/app/.wdm \
 		$(IMAGE_NAME)
 	@echo -e "${GREEN}✅ Container started. Waiting for health check...${NC}"
 	@sleep 10
