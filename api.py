@@ -14,6 +14,7 @@ import logging
 import re
 import traceback
 import time
+import asyncio
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from selenium_scraper import FreeElectionsScraper
@@ -60,6 +61,10 @@ scraper = None
 RATE_LIMIT_REQUESTS = 1000  # Max requests per window
 RATE_LIMIT_WINDOW = 60     # Window in seconds (1 minute)
 rate_limit_store = defaultdict(list)  # Store timestamps per client IP
+
+# Concurrency control
+MAX_CONCURRENT_REQUESTS = 3  # Allow max 3 concurrent scraper requests
+request_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 
 @asynccontextmanager
@@ -414,19 +419,19 @@ async def health_check():
 async def lookup_national_id(request: NationalIDRequest):
     """
     Lookup electoral information by national ID (with automatic retry on failures)
-    
+
     The API will automatically retry up to 3 times if the request fails due to:
     - Network issues
     - Timeout errors
     - Page loading issues
     - Temporary website unavailability
-    
+
     Args:
         request: NationalIDRequest containing the national ID (14 digits)
-        
+
     Returns:
         JSON response with electoral data or error information
-        
+
     Raises:
         HTTPException: If scraper is not available or validation fails
     """
@@ -436,191 +441,193 @@ async def lookup_national_id(request: NationalIDRequest):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Scraper service is not available. Please try again later."
         )
-    
+
     national_id = request.national_id
     logger.info(f"Received lookup request for national ID: {national_id}")
-    
-    try:
-        # Perform the scraping (with automatic retries and timeout)
-        result = scraper.scrape_electoral_data(national_id, timeout=30)
-        
-        # Handle None result (shouldn't happen, but defensive programming)
-        if result is None:
-            logger.error(f"Scraper returned None for {national_id}")
-            error_response = ErrorResponse(
-                success=False,
-                national_id=national_id,
-                error="Unexpected error: scraper returned no data"
-            )
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content=error_response.model_dump(exclude_none=True)
-            )
-        
-        if result['success']:
-            data = result['data']
-            data_status = data.get('status', 'unknown')
-            
-            # Handle different statuses
-            if data_status == 'success':
-                # Check if district is in allowed list
-                district = data.get('district', '')
-                
-                if district and district not in ALLOWED_DISTRICTS:
-                    # Voter is registered but in a district outside our target
-                    response = OutOfDistrictResponse(
-                        success=True,
-                        national_id=national_id,
-                        status="out_of_district",
-                        data=OutOfDistrictData(
-                            message="الناخب مسجل في دائرة خارج النطاق المستهدف",
-                            reason="out_of_district",
-                            district=district,
-                            electoral_center=data.get('electoral_center', ''),
-                            address=data.get('address', '')
-                        )
-                    )
-                    logger.info(f"National ID {national_id} is out of target districts: {district}")
-                    return JSONResponse(
-                        status_code=status.HTTP_200_OK,
-                        content=response.model_dump(exclude_none=True)
-                    )
-                
-                # Registered voter with complete data in allowed district
-                response = SuccessResponse(
-                    success=True,
-                    national_id=national_id,
-                    status="registered",
-                    data=RegisteredVoterData(
-                        electoral_center=data.get('electoral_center', ''),
-                        district=district,
-                        address=data.get('address', ''),
-                        subcommittee_number=data.get('subcommittee_number', ''),
-                        electoral_list_number=data.get('electoral_list_number', '')
-                    )
-                )
-                logger.info(f"Successfully retrieved data for {national_id} in allowed district: {district}")
-                return JSONResponse(
-                    status_code=status.HTTP_200_OK,
-                    content=response.model_dump(exclude_none=True)
-                )
-                
-            elif data_status == 'underage':
-                # Person is underage
-                response = UnderageResponse(
-                    success=True,
-                    national_id=national_id,
-                    status="underage",
-                    data=UnderageData(
-                        message=data.get('error_message', 'عفوا, غير مسموح لإقل من 18 سنة بالإنتخاب'),
-                        reason="underage"
-                    )
-                )
-                logger.info(f"National ID {national_id} is underage")
-                return JSONResponse(
-                    status_code=status.HTTP_200_OK,
-                    content=response.model_dump(exclude_none=True)
-                )
-                
-            elif data_status == 'not_registered':
-                # Not in voter database
-                response = NotRegisteredResponse(
-                    success=True,
-                    national_id=national_id,
-                    status="not_registered",
-                    data=NotRegisteredData(
-                        message=data.get('error_message', 'الرقم القومي غير مدرج بقاعدة بيانات الناخبين'),
-                        reason="not_registered"
-                    )
-                )
-                logger.info(f"National ID {national_id} not registered")
-                return JSONResponse(
-                    status_code=status.HTTP_200_OK,
-                    content=response.model_dump(exclude_none=True)
-                )
-            else:
-                # Unknown status
+
+    # Acquire semaphore to control concurrency
+    async with request_semaphore:
+        try:
+            # Perform the scraping (with automatic retries and timeout)
+            result = scraper.scrape_electoral_data(national_id, timeout=30)
+
+            # Handle None result (shouldn't happen, but defensive programming)
+            if result is None:
+                logger.error(f"Scraper returned None for {national_id}")
                 error_response = ErrorResponse(
                     success=False,
                     national_id=national_id,
-                    error=f"Unknown status: {data_status}"
+                    error="Unexpected error: scraper returned no data"
                 )
                 return JSONResponse(
                     status_code=status.HTTP_200_OK,
                     content=error_response.model_dump(exclude_none=True)
                 )
-        else:
-            # Scraping failed
-            error_message = result.get('error', 'Unknown error occurred')
-            retries_exhausted = result.get('retries_exhausted', False)
-            
-            if retries_exhausted:
-                logger.error(f"Scraping failed for {national_id} after all retries: {error_message}")
+
+            if result['success']:
+                data = result['data']
+                data_status = data.get('status', 'unknown')
+
+                # Handle different statuses
+                if data_status == 'success':
+                    # Check if district is in allowed list
+                    district = data.get('district', '')
+
+                    if district and district not in ALLOWED_DISTRICTS:
+                        # Voter is registered but in a district outside our target
+                        response = OutOfDistrictResponse(
+                            success=True,
+                            national_id=national_id,
+                            status="out_of_district",
+                            data=OutOfDistrictData(
+                                message="الناخب مسجل في دائرة خارج النطاق المستهدف",
+                                reason="out_of_district",
+                                district=district,
+                                electoral_center=data.get('electoral_center', ''),
+                                address=data.get('address', '')
+                            )
+                        )
+                        logger.info(f"National ID {national_id} is out of target districts: {district}")
+                        return JSONResponse(
+                            status_code=status.HTTP_200_OK,
+                            content=response.model_dump(exclude_none=True)
+                        )
+                    
+                    # Registered voter with complete data in allowed district
+                    response = SuccessResponse(
+                        success=True,
+                        national_id=national_id,
+                        status="registered",
+                        data=RegisteredVoterData(
+                            electoral_center=data.get('electoral_center', ''),
+                            district=district,
+                            address=data.get('address', ''),
+                            subcommittee_number=data.get('subcommittee_number', ''),
+                            electoral_list_number=data.get('electoral_list_number', '')
+                        )
+                    )
+                    logger.info(f"Successfully retrieved data for {national_id} in allowed district: {district}")
+                    return JSONResponse(
+                        status_code=status.HTTP_200_OK,
+                        content=response.model_dump(exclude_none=True)
+                    )
+                    
+                elif data_status == 'underage':
+                    # Person is underage
+                    response = UnderageResponse(
+                        success=True,
+                        national_id=national_id,
+                        status="underage",
+                        data=UnderageData(
+                            message=data.get('error_message', 'عفوا, غير مسموح لإقل من 18 سنة بالإنتخاب'),
+                            reason="underage"
+                        )
+                    )
+                    logger.info(f"National ID {national_id} is underage")
+                    return JSONResponse(
+                        status_code=status.HTTP_200_OK,
+                        content=response.model_dump(exclude_none=True)
+                    )
+                    
+                elif data_status == 'not_registered':
+                    # Not in voter database
+                    response = NotRegisteredResponse(
+                        success=True,
+                        national_id=national_id,
+                        status="not_registered",
+                        data=NotRegisteredData(
+                            message=data.get('error_message', 'الرقم القومي غير مدرج بقاعدة بيانات الناخبين'),
+                            reason="not_registered"
+                        )
+                    )
+                    logger.info(f"National ID {national_id} not registered")
+                    return JSONResponse(
+                        status_code=status.HTTP_200_OK,
+                        content=response.model_dump(exclude_none=True)
+                    )
+                else:
+                    # Unknown status
+                    error_response = ErrorResponse(
+                    success=False,
+                    national_id=national_id,
+                    error=f"Unknown status: {data_status}"
+                )
+                    return JSONResponse(
+                    status_code=status.HTTP_200_OK,
+                    content=error_response.model_dump(exclude_none=True)
+                )
             else:
-                logger.error(f"Scraping failed for {national_id}: {error_message}")
-            
+                # Scraping failed
+                error_message = result.get('error', 'Unknown error occurred')
+                retries_exhausted = result.get('retries_exhausted', False)
+                
+                if retries_exhausted:
+                    logger.error(f"Scraping failed for {national_id} after all retries: {error_message}")
+                else:
+                    logger.error(f"Scraping failed for {national_id}: {error_message}")
+                
+                error_response = ErrorResponse(
+                    success=False,
+                    national_id=national_id,
+                    error=error_message,
+                    retries_exhausted=retries_exhausted if retries_exhausted else None
+                )
+                
+                return JSONResponse(
+                    status_code=status.HTTP_200_OK,
+                    content=error_response.model_dump(exclude_none=True)
+                )
+                
+        except ValueError as e:
+            # Validation error (should be caught by Pydantic, but just in case)
+            logger.error(f"Validation error for {national_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
+        except TimeoutError as e:
+            # Timeout error
+            logger.error(f"Timeout error for {national_id}: {str(e)}")
             error_response = ErrorResponse(
                 success=False,
                 national_id=national_id,
-                error=error_message,
-                retries_exhausted=retries_exhausted if retries_exhausted else None
+                error="Request timeout. The website took too long to respond.",
+                retries_exhausted=True
             )
-            
             return JSONResponse(
                 status_code=status.HTTP_200_OK,
                 content=error_response.model_dump(exclude_none=True)
             )
-            
-    except ValueError as e:
-        # Validation error (should be caught by Pydantic, but just in case)
-        logger.error(f"Validation error for {national_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except TimeoutError as e:
-        # Timeout error
-        logger.error(f"Timeout error for {national_id}: {str(e)}")
-        error_response = ErrorResponse(
-            success=False,
-            national_id=national_id,
-            error="Request timeout. The website took too long to respond.",
-            retries_exhausted=True
-        )
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content=error_response.model_dump(exclude_none=True)
-        )
-    except ConnectionError as e:
-        # Network/connection error
-        logger.error(f"Connection error for {national_id}: {str(e)}")
-        error_response = ErrorResponse(
-            success=False,
-            national_id=national_id,
-            error="Network connection error. Please check your internet connection and try again.",
-            retries_exhausted=True
-        )
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content=error_response.model_dump(exclude_none=True)
-        )
-    except TimeoutError as e:
-        # Timeout error
-        logger.error(f"Timeout error for {national_id}: {str(e)}")
-        error_response = ErrorResponse(
-            success=False,
-            national_id=national_id,
-            error="Request timed out. The service took too long to respond. Please try again.",
-            retries_exhausted=True
-        )
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content=error_response.model_dump(exclude_none=True)
-        )
-    except Exception as e:
-        # Catch-all for unexpected errors
-        logger.error(f"Unexpected error during lookup for {national_id}: {str(e)}", exc_info=True)
-        error_response = ErrorResponse(
+        except ConnectionError as e:
+            # Network/connection error
+            logger.error(f"Connection error for {national_id}: {str(e)}")
+            error_response = ErrorResponse(
+                success=False,
+                national_id=national_id,
+                error="Network connection error. Please check your internet connection and try again.",
+                retries_exhausted=True
+            )
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content=error_response.model_dump(exclude_none=True)
+            )
+        except TimeoutError as e:
+            # Timeout error
+            logger.error(f"Timeout error for {national_id}: {str(e)}")
+            error_response = ErrorResponse(
+                success=False,
+                national_id=national_id,
+                error="Request timed out. The service took too long to respond. Please try again.",
+                retries_exhausted=True
+            )
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content=error_response.model_dump(exclude_none=True)
+            )
+        except Exception as e:
+            # Catch-all for unexpected errors
+            logger.error(f"Unexpected error during lookup for {national_id}: {str(e)}", exc_info=True)
+            error_response = ErrorResponse(
             success=False,
             national_id=national_id,
             error=f"Unexpected server error: {str(e)}"

@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   egypt-voter-api:
@@ -13,44 +13,55 @@ services:
       - DD_TRACE_ENABLED=false
       # Python settings
       - PYTHONUNBUFFERED=1
-      # Scraper settings (optional - can be customized)
+      # Scraper settings - optimized for production
       - MAX_RETRIES=3
       - RETRY_DELAY=2
+      # Production settings
+      - UVICORN_WORKERS=1 # Single worker to avoid browser conflicts
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=8000
     restart: unless-stopped
-    # Resource limits (adjust as needed)
+    # Increased resource limits for production
     deploy:
       resources:
         limits:
-          cpus: '2'
-          memory: 2G
+          cpus: "2"
+          memory: 4G # Increased for Chrome stability
         reservations:
-          cpus: '1'
-          memory: 1G
-    # Shared memory size for Chrome
-    shm_size: 2gb
-    # Health check
+          cpus: "1"
+          memory: 2G
+    # Shared memory size for Chrome - increased for stability
+    shm_size: 4gb
+    # Improved health check with longer timeout
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "--max-time",
+          "30",
+          "http://localhost:8000/health",
+        ]
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 120s
     # Logging configuration
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "50m"
+        max-file: "5"
     # Security options
     security_opt:
       - no-new-privileges:true
-    # Note: Read-only filesystem removed due to Chrome requirements
-    # Security is maintained through other measures (non-root user, limited capabilities)
     tmpfs:
       - /tmp
+      - /app/tmp # Additional temp directory for Chrome
     volumes:
       - webdriver-cache:/app/.wdm
+      - ./logs:/app/logs # Mount logs directory
 
 volumes:
   webdriver-cache:
-
