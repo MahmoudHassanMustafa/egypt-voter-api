@@ -65,3 +65,9 @@ services:
 
 volumes:
   webdriver-cache:
+
+# Connect to the same network as the other application
+networks:
+  default:
+    external:
+      name: assembly-election_assembly-network

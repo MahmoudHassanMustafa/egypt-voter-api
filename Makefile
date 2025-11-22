@@ -7,8 +7,8 @@
 IMAGE_NAME := egypt-voter-api
 CONTAINER_NAME := egypt-voter-api
 PORT := 8000
-SHM_SIZE := 2gb
-MEMORY_LIMIT := 2g
+SHM_SIZE := 4gb
+MEMORY_LIMIT := 4g
 CPU_LIMIT := 2
 
 # Colors for output
@@ -35,6 +35,7 @@ run: ## Run the container in production mode
 	docker run -d \
 		--name $(CONTAINER_NAME) \
 		--restart unless-stopped \
+		--network assembly-election_assembly-network \
 		-p $(PORT):8000 \
 		-e PYTHONUNBUFFERED=1 \
 		-e DD_TRACE_ENABLED=false \
