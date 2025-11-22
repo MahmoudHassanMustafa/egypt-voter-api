@@ -7,9 +7,9 @@
 IMAGE_NAME := egypt-voter-api
 CONTAINER_NAME := egypt-voter-api
 PORT := 8000
-SHM_SIZE := 4gb
-MEMORY_LIMIT := 4g
-CPU_LIMIT := 2
+SHM_SIZE := 8gb
+MEMORY_LIMIT := 8g
+CPU_LIMIT := 4
 
 # Colors for output
 GREEN := \033[0;32m

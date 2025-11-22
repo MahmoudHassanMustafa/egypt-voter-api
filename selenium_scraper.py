@@ -192,6 +192,27 @@ class FreeElectionsScraper:
                 # Navigate back to the main inquiry page
                 self.driver.get(INQUIRY_URL)
                 time.sleep(1)  # Brief wait for page load
+
+                # Clear any existing form data by refreshing the iframe
+                try:
+                    wait = WebDriverWait(self.driver, 5)
+                    iframe = wait.until(EC.presence_of_element_located((By.ID, "ocv_iframe_id")))
+                    self.driver.switch_to.frame(iframe)
+
+                    # Try to clear any input fields
+                    try:
+                        nid_input = self.driver.find_element(By.ID, "nid")
+                        nid_input.clear()
+                    except:
+                        pass  # Ignore if field doesn't exist
+
+                    # Switch back to main content
+                    self.driver.switch_to.default_content()
+
+                except Exception as e:
+                    logger.debug(f"Could not clear form data: {e}")
+                    # Continue anyway
+
                 self.last_activity_time = time.time()
                 logger.info("Browser session reset to main page")
         except Exception as e:
@@ -200,6 +221,36 @@ class FreeElectionsScraper:
             self.close()
             self.setup_driver(self.driver is not None)  # Recreate with same headless setting
     
+    def scrape_electoral_data_isolated(self, national_id: str, timeout: int = 30) -> dict:
+        """
+        Scrape electoral data using an isolated browser instance for this request.
+        This ensures complete separation between concurrent user requests.
+        """
+        # Create a new browser instance for this request
+        temp_scraper = FreeElectionsScraper(headless=True, max_retries=self.max_retries, retry_delay=self.retry_delay)
+        try:
+            # Use the temp scraper's method but with timeout
+            def timeout_handler(signum, frame):
+                raise TimeoutError("Request timed out")
+
+            # Set up timeout alarm
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(timeout)
+
+            try:
+                result = temp_scraper.scrape_electoral_data(national_id)
+                return result
+            finally:
+                # Reset signal handler
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+        finally:
+            # Always close the temporary browser instance
+            try:
+                temp_scraper.close()
+            except:
+                pass
+
     def scrape_electoral_data(self, national_id: str, timeout: int = 30) -> dict:
         """
         Scrape electoral data for a given national ID with retry mechanism and timeout.

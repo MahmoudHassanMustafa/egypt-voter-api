@@ -63,8 +63,12 @@ RATE_LIMIT_WINDOW = 60     # Window in seconds (1 minute)
 rate_limit_store = defaultdict(list)  # Store timestamps per client IP
 
 # Concurrency control
-MAX_CONCURRENT_REQUESTS = 3  # Allow max 3 concurrent scraper requests
+MAX_CONCURRENT_REQUESTS = 10  # Allow max 10 concurrent scraper requests (each gets its own browser)
 request_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+# Browser pool for concurrent requests
+browser_pool = []
+pool_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 
 @asynccontextmanager
@@ -448,8 +452,8 @@ async def lookup_national_id(request: NationalIDRequest):
     # Acquire semaphore to control concurrency
     async with request_semaphore:
         try:
-            # Perform the scraping (with automatic retries and timeout)
-            result = scraper.scrape_electoral_data(national_id, timeout=30)
+            # Perform the scraping with isolated browser instance (no shared state between users)
+            result = scraper.scrape_electoral_data_isolated(national_id, timeout=30)
 
             # Handle None result (shouldn't happen, but defensive programming)
             if result is None:
