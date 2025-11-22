@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  egypt-voter-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: egypt-voter-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Disable Datadog tracing
+      - DD_TRACE_ENABLED=false
+      # Python settings
+      - PYTHONUNBUFFERED=1
+      # Scraper settings (optional - can be customized)
+      - MAX_RETRIES=3
+      - RETRY_DELAY=2
+    restart: unless-stopped
+    # Resource limits (adjust as needed)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    # Shared memory size for Chrome
+    shm_size: 2gb
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    # Read-only root filesystem (except /tmp)
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.wdm:uid=1000,gid=1000
+

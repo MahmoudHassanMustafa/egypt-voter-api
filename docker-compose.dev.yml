@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  egypt-voter-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: egypt-voter-api-dev
+    ports:
+      - "8000:8000"
+    environment:
+      - DD_TRACE_ENABLED=false
+      - PYTHONUNBUFFERED=1
+      - MAX_RETRIES=3
+      - RETRY_DELAY=2
+    # Mount source code for hot reload
+    volumes:
+      - ./api.py:/app/api.py
+      - ./selenium_scraper.py:/app/selenium_scraper.py
+    # Override CMD for development with reload
+    command: uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+    shm_size: 2gb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
